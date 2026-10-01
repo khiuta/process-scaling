@@ -1,20 +1,3 @@
-"""
-Live visualization for the scheduling algorithms in scaling.py.
-
-Design:
-  - Each algorithm run happens in its own background thread, calling the
-    original scaling.py function unchanged except for the on_tick hook.
-  - Each tick (`on_tick(time_step, curr_proc, waiting_tasks, finished_procs)`)
-    is pushed onto a thread-safe queue.Queue for that run.
-  - The main thread owns the matplotlib figure. A FuncAnimation timer drains
-    each run's queue, updates a small state machine per task (finished
-    segments + one "open" segment currently growing), and redraws.
-  - The open segment's right edge is interpolated using wall-clock time
-    since the last tick, so bars grow smoothly instead of jumping.
-
-Nothing here is imported by scaling.py -- the coupling is one-directional.
-"""
-
 import os
 import queue
 import sys
@@ -93,14 +76,14 @@ _MOSAICS = {
 
 
 def _task_colors(processes):
-    """Assign a stable color per task id using tab10/tab20."""
+    #Assign a stable color per task id using tab10/tab20.
     ids = sorted({p['task'] for p in processes})
     cmap = plt.get_cmap('tab20' if len(ids) > 10 else 'tab10')
     return {tid: cmap(i % cmap.N) for i, tid in enumerate(ids)}
 
 
 class _RunState:
-    """Tracks the evolving Gantt data for a single algorithm run."""
+    #Tracks the evolving Gantt data for a single algorithm run.
 
     def __init__(self, name, processes, show_priority, show_dynamic):
         self.name = name
@@ -118,6 +101,8 @@ class _RunState:
         # per task: latest known priority / dynamic priority
         self.priority = {tid: None for tid in self.task_ids}
         self.dynamic_priority = {tid: None for tid in self.task_ids}
+        # per task: simulated time at which it finished, or None while still going
+        self.finished_at = {tid: None for tid in self.task_ids}
 
         self.last_tick_time = -1          # simulated seconds, i.e. the `i` from on_tick
         self.last_tick_wallclock = None    # time.time() when that tick arrived
@@ -130,13 +115,28 @@ class _RunState:
 
     def _apply_tick(self, t, active_id, states, priorities, dyn_priorities):
         """Close out the previous open segment (if its state changed) and
-        open a fresh one for time step t -> t+1 for every task present."""
+        open a fresh one for time step t -> t+1 for every task present.
+        A task that has finished is frozen at the moment it finishes: its
+        segment stops growing and further ticks for it are ignored, so the
+        bar visually stays put right where the task completed."""
         for tid, state in states.items():
+            if self.finished_at.get(tid) is not None:
+                continue  # already frozen, don't keep drawing it
+
             prev = self.open_seg.get(tid)
             if prev is None or prev[1] != state:
                 if prev is not None:
                     self.segments[tid].append((prev[0], t, prev[1]))
                 self.open_seg[tid] = [t, state]
+
+            if state == 'finished':
+                # close this final segment at a fixed width (t -> t+1) and
+                # freeze -- no further growth, no further updates.
+                start = self.open_seg[tid][0]
+                self.segments[tid].append((start, t + 1, 'finished'))
+                self.open_seg[tid] = None
+                self.finished_at[tid] = t + 1
+
             if tid in priorities:
                 self.priority[tid] = priorities[tid]
             if tid in dyn_priorities:
@@ -146,7 +146,7 @@ class _RunState:
         self.last_tick_wallclock = time.time()
 
     def drain(self):
-        """Pull every pending tick off the queue and fold it into state."""
+        #Pull every pending tick off the queue and fold it into state.
         drained_any = False
         while True:
             try:
@@ -195,7 +195,7 @@ class _RunState:
 
 
 class LiveDashboard:
-    """Runs up to 4 algorithms concurrently and animates them side by side."""
+    #Runs up to 4 algorithms concurrently and animates them side by side.
 
     def __init__(self, runs):
         """
